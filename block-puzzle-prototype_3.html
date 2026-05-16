@@ -1,0 +1,1817 @@
+<!--
+  BLOCK PUZZLE — FEEL TEST PROTOTYPE (Relax Mode)
+  ------------------------------------------------
+  Its job is to answer:
+    1. Does placing pieces feel good? (drag + snap)
+    2. Does a board objective create a "hmm, let me think" moment?
+    3. Does the coin / streak / shop loop feel rewarding?
+
+  What's IN:  8x8 grid · three-piece tray · drag-and-drop · row/column
+              clears · relax mode · one objective · coins · STREAK
+              MULTIPLIER · SKIN SHOP (block colors + backgrounds) ·
+              SESSION STATS readout for tuning the earn rate.
+  What's OUT: other modes, gauntlet, real progression, persistence
+              (owned skins reset on reload — fine for a feel test).
+
+  Everything is in this one file on purpose — read it top to bottom.
+  The game LOGIC (pieces, placement, clears, scoring, skins) is plain
+  JS and will survive a port to Phaser / React Native later.
+
+  Tweak these first to change the feel:  GRID_SIZE, PIECES, the COIN_*
+  values, STREAK_* values, and the SKINS list with their prices.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Block Puzzle — Feel Test</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* ---- THEME ------------------------------------------------------ */
+  :root {
+    --bg:        #1c1714;   /* warm near-black — calmer than Block Blast's pure black */
+    --bg-2:      #241d18;
+    --panel:     #2a221d;
+    --panel-hi:  #34291f;
+    --cell:      #221b17;   /* empty cell well */
+    --cell-edge: #100c0a;
+    --line:      #3a2f26;
+    --text:      #ece1d3;
+    --text-dim:  #9a8a7a;
+    --gold:      #e0a960;   /* coins */
+    --mint:      #84d2bf;   /* objective glow — distinct from gold */
+    --invalid:   #b56a5e;
+
+    --cell-size: 46px;      /* set by JS to match board width */
+    --gap: 4px;
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background:
+      radial-gradient(120% 80% at 50% -10%, #2c2218 0%, transparent 60%),
+      radial-gradient(100% 60% at 50% 110%, #241c2a 0%, transparent 55%),
+      var(--bg);
+    color: var(--text);
+    font-family: "Fredoka", system-ui, sans-serif;
+    font-weight: 400;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 14px;
+    padding: 18px 14px 28px;
+    min-height: 100%;
+    overflow-x: hidden;
+    user-select: none;
+    /* touch-action handled below — see MOBILE TOUCH BEHAVIOR section. */
+  }
+  /* MOBILE TOUCH BEHAVIOR --------------------------------------------
+     The browser will hijack touch events for scrolling, pull-to-refresh,
+     long-press menus, the iOS magnifier, and double-tap-zoom unless we
+     explicitly tell it not to. Each of these caused "everything goes
+     everywhere" when dragging a piece. The defenses below shut them off:
+       - overscroll-behavior: none — kills pull-to-refresh and the
+         rubber-band bounce.
+       - user-select / -webkit-touch-callout — kills text selection on
+         long-press and the iOS context menu / magnifier.
+     The interesting part is touch-action: we WANT the page to scroll
+     normally (the shop modal can be tall, etc.) but we DON'T want a
+     piece-drag to be interpreted as a scroll. So tray pieces, the hold
+     well, and the board all set touch-action: none on themselves —
+     when your finger lands on one, the browser knows that touch belongs
+     to us, not to scrolling. Everywhere else, scroll works fine.
+     The JS also adds a .dragging class on <html> during a live drag
+     and calls preventDefault() on touchmove, as a belt-and-braces
+     defense in case any element below us slipped through the CSS net. */
+  html, body {
+    overscroll-behavior: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+  }
+  /* Locks the whole page during an active piece drag. */
+  html.dragging, html.dragging body {
+    touch-action: none;
+    overflow: hidden;
+  }
+  /* Elements where a drag can START — these must never trigger a scroll
+     gesture, regardless of which way the finger moves. */
+  .tray-slot,
+  .hold,
+  .board,
+  .board-wrap {
+    touch-action: none;
+  }
+
+
+  header {
+    width: 100%;
+    max-width: 460px;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+  .title {
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  .coins {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--gold);
+  }
+  .coins .dot {
+    width: 16px; height: 16px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #f4cf8e, var(--gold));
+    box-shadow: 0 0 10px rgba(224,169,96,.45);
+  }
+  .coins.bump { animation: bump .32s ease; }
+  @keyframes bump { 0%{transform:scale(1)} 40%{transform:scale(1.18)} 100%{transform:scale(1)} }
+
+  /* ---- OBJECTIVE -------------------------------------------------- */
+  .objective {
+    width: 100%;
+    max-width: 460px;
+    background: linear-gradient(180deg, var(--panel-hi), var(--panel));
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 11px 15px;
+    display: flex;
+    align-items: center;
+    gap: 11px;
+  }
+  .objective .pip {
+    width: 13px; height: 13px; border-radius: 4px;
+    background: var(--mint);
+    box-shadow: 0 0 12px rgba(132,210,191,.6);
+    flex: none;
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:.55} 50%{opacity:1} }
+  .objective .label { font-size: 14px; color: var(--text-dim); }
+  .objective .label b { color: var(--text); font-weight: 600; }
+  .objective .prog {
+    margin-left: auto;
+    font-size: 15px; font-weight: 600;
+    color: var(--mint);
+  }
+
+  /* ---- BOARD ------------------------------------------------------ */
+  .board-wrap {
+    padding: var(--gap);
+    background: linear-gradient(180deg, #1f1813, #181210);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    box-shadow: 0 18px 40px -18px rgba(0,0,0,.8), inset 0 1px 0 rgba(255,255,255,.03);
+  }
+  .board {
+    display: grid;
+    grid-template-columns: repeat(8, var(--cell-size));
+    grid-template-rows: repeat(8, var(--cell-size));
+    gap: var(--gap);
+    position: relative;
+  }
+  .cell {
+    background: var(--cell);
+    border-radius: 8px;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,.55), inset 0 -1px 0 rgba(255,255,255,.02);
+    position: relative;
+  }
+  /* a filled cell — color set inline */
+  .cell.filled {
+    box-shadow:
+      inset 0 -3px 6px rgba(0,0,0,.32),
+      inset 0 2px 2px rgba(255,255,255,.22),
+      0 2px 4px rgba(0,0,0,.3);
+  }
+  .cell.settle { animation: settle .26s cubic-bezier(.34,1.56,.64,1); }
+  @keyframes settle { 0%{transform:scale(.62);opacity:.4} 100%{transform:scale(1);opacity:1} }
+
+  /* a cell the player just sealed into a 1-tile hole — flashes red so the
+     player learns WHY that placement paid no coins. Purely feedback. */
+  .cell.stranded::before {
+    content: ""; position: absolute; inset: 0;
+    border-radius: 8px;
+    background: var(--invalid);
+    animation: strandflash .9s ease forwards;
+    pointer-events: none;
+  }
+  @keyframes strandflash {
+    0%   { opacity: .7; }
+    70%  { opacity: .55; }
+    100% { opacity: 0; }
+  }
+
+  /* objective target marker, sits inside an empty cell */
+  .cell .target {
+    position: absolute; inset: 0;
+    border-radius: 8px;
+    border: 2px solid var(--mint);
+    box-shadow: 0 0 14px rgba(132,210,191,.5), inset 0 0 10px rgba(132,210,191,.25);
+    animation: pulse 2.4s ease-in-out infinite;
+    pointer-events: none;
+  }
+  /* a target cell that's currently covered by a piece keeps a hint ring */
+  .cell.filled .target {
+    border-color: rgba(255,255,255,.85);
+    box-shadow: 0 0 12px rgba(255,255,255,.4);
+  }
+
+  /* ghost preview while dragging */
+  .cell.ghost::after {
+    content: ""; position: absolute; inset: 0;
+    border-radius: 8px;
+    background: var(--ghost-color, #fff);
+    opacity: .34;
+  }
+  .cell.ghost-bad::after {
+    content: ""; position: absolute; inset: 0;
+    border-radius: 8px;
+    background: var(--invalid);
+    opacity: .4;
+  }
+  /* clearing animation */
+  .cell.clearing {
+    animation: clearpop .42s ease forwards;
+    z-index: 2;
+  }
+  @keyframes clearpop {
+    0%   { filter: brightness(1); transform: scale(1); }
+    30%  { filter: brightness(2.4); transform: scale(1.12); }
+    100% { filter: brightness(1); transform: scale(.2); opacity: 0; }
+  }
+
+  /* ---- TRAY + HOLD ------------------------------------------------ */
+  /* The tray row holds: [HOLD slot] [ tray: 3 slots ]. The hold slot is
+     visually separate (its own little well) so it reads as "set aside",
+     not as a fourth tray piece. */
+  .tray-row {
+    width: 100%;
+    max-width: 460px;
+    display: flex;
+    /* Wider gap = a real visual + interactive deadzone between hold and
+       tray. Earlier this was 8px; finger swinging horizontally during a
+       drag could clip the hold slot accidentally. 18px is wide enough
+       that crossing it has to be deliberate, narrow enough not to
+       cramp the tray. (Pairs with the rect-inset on overHold detection
+       in JS — Fix 1 + Fix 2 together.) */
+    gap: 18px;
+    align-items: stretch;
+  }
+  .hold {
+    flex: none;
+    width: 84px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    background: linear-gradient(180deg, var(--bg-2), #1b1510);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 10px 6px;
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .hold .hold-label {
+    font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  .hold .hold-well {
+    flex: 1;
+    width: 100%;
+    display: flex; align-items: center; justify-content: center;
+    min-height: 64px;
+  }
+  /* empty hold shows a faint dashed placeholder */
+  .hold.empty .hold-well::after {
+    content: "";
+    width: 30px; height: 30px;
+    border: 2px dashed var(--line);
+    border-radius: 8px;
+  }
+  /* highlight when a dragged piece is hovering the hold slot AND it's
+     allowed to drop there (slot empty) */
+  .hold.drop-ok {
+    border-color: var(--mint);
+    background: linear-gradient(180deg, #20322b, #1a2922);
+  }
+  /* highlight refused — slot already full (not swappable) */
+  .hold.drop-bad {
+    border-color: var(--invalid);
+  }
+
+  .tray {
+    flex: 1;
+    min-height: 120px;
+    display: flex;
+    justify-content: space-around;
+    align-items: center;
+    gap: 8px;
+    background: linear-gradient(180deg, var(--panel), var(--bg-2));
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 14px 8px;
+  }
+  .tray-slot {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 92px;
+  }
+  .piece {
+    display: grid;
+    gap: 3px;
+    cursor: grab;
+    transition: transform .14s ease, opacity .14s ease;
+  }
+  .piece:active { cursor: grabbing; }
+  .piece.lifted { opacity: .25; }      /* the original, while a copy is dragged */
+  .piece-cell {
+    width: 24px; height: 24px;
+    border-radius: 6px;
+  }
+  .piece-cell.on {
+    box-shadow:
+      inset 0 -2px 4px rgba(0,0,0,.32),
+      inset 0 2px 2px rgba(255,255,255,.22);
+  }
+  .piece-cell.off { background: transparent; }
+
+  /* the floating piece that follows the pointer */
+  #drag-layer {
+    position: fixed; inset: 0;
+    pointer-events: none;
+    z-index: 50;
+  }
+  .floating {
+    position: absolute;
+    display: grid;
+    gap: var(--gap);
+  }
+  .floating .fc {
+    width: var(--cell-size); height: var(--cell-size);
+    border-radius: 8px;
+    box-shadow:
+      inset 0 -3px 6px rgba(0,0,0,.32),
+      inset 0 2px 2px rgba(255,255,255,.22),
+      0 8px 18px rgba(0,0,0,.5);
+  }
+  .floating .fc.off { box-shadow: none; }
+
+  /* ---- TOAST ------------------------------------------------------ */
+  .toast {
+    height: 20px;
+    font-size: 14px;
+    color: var(--text-dim);
+    opacity: 0;
+    transition: opacity .25s ease;
+  }
+  .toast.show { opacity: 1; }
+
+  .hint {
+    font-size: 12px; color: #6f6356;
+    max-width: 460px; text-align: center; line-height: 1.5;
+  }
+
+  /* ---- STREAK BADGE ----------------------------------------------- */
+  /* Sits next to the coin counter. Grows + glows as the multiplier
+     climbs, so a hot streak is something you can SEE and feel. */
+  .streak {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 14px; font-weight: 600;
+    color: var(--text-dim);
+    opacity: .5;
+    transition: opacity .2s ease, transform .2s ease, color .2s ease;
+  }
+  .streak.active {
+    opacity: 1;
+    color: var(--streak, #e08a5c);
+    transform: scale(1.05);
+  }
+  .streak .flame {
+    width: 14px; height: 14px; border-radius: 50% 50% 50% 0;
+    transform: rotate(45deg);
+    background: var(--streak, #e08a5c);
+    box-shadow: 0 0 8px var(--streak, #e08a5c);
+    opacity: 0;
+    transition: opacity .2s ease;
+  }
+  .streak.active .flame { opacity: 1; }
+  .streak.bump { animation: bump .3s ease; }
+
+  /* ---- TOP BAR BUTTON --------------------------------------------- */
+  .iconbtn {
+    background: var(--panel-hi);
+    border: 1px solid var(--line);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13px; font-weight: 500;
+    padding: 7px 13px;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background .15s ease, transform .1s ease;
+  }
+  .iconbtn:hover { background: #3f3225; }
+  .iconbtn:active { transform: scale(.96); }
+
+  /* ---- MODAL (shop + summary share this) -------------------------- */
+  .scrim {
+    position: fixed; inset: 0;
+    background: rgba(10,7,5,.72);
+    backdrop-filter: blur(3px);
+    display: none;
+    align-items: center; justify-content: center;
+    z-index: 100;
+    padding: 20px;
+  }
+  .scrim.open { display: flex; }
+  .modal {
+    width: 100%; max-width: 440px;
+    max-height: 86vh;
+    overflow-y: auto;
+    background: linear-gradient(180deg, var(--panel-hi), var(--bg-2));
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    padding: 20px;
+    box-shadow: 0 30px 70px -20px rgba(0,0,0,.9);
+    animation: rise .26s cubic-bezier(.34,1.3,.64,1);
+  }
+  @keyframes rise { 0%{transform:translateY(18px) scale(.97);opacity:0} 100%{transform:none;opacity:1} }
+  .modal-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 4px;
+  }
+  .modal-head h2 {
+    margin: 0; font-size: 19px; font-weight: 600; letter-spacing: .01em;
+  }
+  .modal-head .close {
+    background: none; border: none; color: var(--text-dim);
+    font-size: 24px; cursor: pointer; line-height: 1; padding: 0 4px;
+  }
+  .modal-sub { font-size: 13px; color: var(--text-dim); margin: 0 0 16px; }
+
+  /* ---- SHOP GRID -------------------------------------------------- */
+  .shop-section-label {
+    font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--text-dim); margin: 14px 0 8px;
+  }
+  .skin-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+  }
+  .skin-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 10px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .skin-card.equipped { border-color: var(--mint); box-shadow: 0 0 0 1px var(--mint) inset; }
+  .skin-name { font-size: 13px; font-weight: 600; }
+  /* mini preview swatch */
+  .skin-preview {
+    height: 56px; border-radius: 9px;
+    display: grid; gap: 3px; padding: 6px;
+    grid-template-columns: repeat(4, 1fr);
+    align-content: center;
+  }
+  .skin-preview .sw { border-radius: 4px; aspect-ratio: 1; }
+  .skin-btn {
+    border: none; border-radius: 9px;
+    font-family: inherit; font-size: 12px; font-weight: 600;
+    padding: 7px; cursor: pointer;
+    transition: transform .1s ease, filter .15s ease;
+  }
+  .skin-btn:active { transform: scale(.96); }
+  .skin-btn.buy     { background: var(--gold); color: #2a1c08; }
+  .skin-btn.buy:disabled { background: #4a4036; color: #7a6f60; cursor: not-allowed; }
+  .skin-btn.equip   { background: var(--panel-hi); color: var(--text); border: 1px solid var(--line); }
+  .skin-btn.equipped{ background: var(--mint); color: #0f261f; cursor: default; }
+  .price-row { display: flex; align-items: center; gap: 5px; font-size: 12px; }
+  .price-row .mini-dot {
+    width: 11px; height: 11px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #f4cf8e, var(--gold));
+  }
+
+  /* ---- SESSION SUMMARY -------------------------------------------- */
+  .stat-row {
+    display: flex; justify-content: space-between;
+    padding: 11px 2px;
+    border-bottom: 1px solid var(--line);
+    font-size: 14px;
+  }
+  .stat-row:last-child { border-bottom: none; }
+  .stat-row .k { color: var(--text-dim); }
+  .stat-row .v { font-weight: 600; }
+  .stat-row .v.gold { color: var(--gold); }
+
+  /* ---- DEBUG SLIDER (touch lift tuning) -------------------------- */
+  /* Hidden by default; revealed when the first touch event happens, so
+     it doesn't clutter the desktop view. Small and dim — you read the
+     number, not the slider. */
+  .debug-slider {
+    display: none;
+    width: 100%; max-width: 460px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .debug-slider.show { display: block; }
+  .debug-slider label {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .debug-slider label span:last-child {
+    color: var(--text);
+    font-weight: 600;
+  }
+  .debug-slider input[type="range"] {
+    width: 100%;
+    accent-color: var(--gold);
+  }
+</style>
+</head>
+<body>
+
+  <header>
+    <div class="title">Block Puzzle · Relax</div>
+    <div style="display:flex;align-items:center;gap:12px;">
+      <div class="streak" id="streak">
+        <span class="flame"></span><span id="streak-x">x1</span>
+      </div>
+      <div class="coins" id="coins"><span class="dot"></span><span id="coin-count">0</span></div>
+    </div>
+  </header>
+
+  <div style="width:100%;max-width:460px;display:flex;gap:8px;">
+    <button class="iconbtn" id="open-shop" style="flex:1;">Shop</button>
+    <button class="iconbtn" id="open-summary" style="flex:1;">Session Stats</button>
+  </div>
+
+  <div class="objective">
+    <div class="pip"></div>
+    <div class="label">Objective: <b>clear the glowing tiles</b></div>
+    <div class="prog" id="obj-prog">0 / 3</div>
+  </div>
+
+  <div class="board-wrap">
+    <div class="board" id="board"></div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <div class="tray-row">
+    <div class="hold empty" id="hold">
+      <div class="hold-label">Hold</div>
+      <div class="hold-well" id="hold-well"></div>
+    </div>
+    <div class="tray" id="tray"></div>
+  </div>
+
+  <div class="hint">
+    Drag a piece onto the board. Drag one into the <b>Hold</b> slot to set it aside — hold isn't swappable,
+    so once full it stays full until you place the held piece. Sealing a single empty cell flashes red.
+    Clear lines back-to-back to build a streak multiplier.
+  </div>
+
+  <!-- Debug slider: only shown after the first touch event in this session.
+       Lets you tune how high the floating piece sits above your finger on
+       phone, live, without editing code. Desktop users never see it. -->
+  <div class="debug-slider" id="lift-slider-wrap">
+    <label>
+      <span>Touch lift</span>
+      <span id="lift-value">4</span> cells
+    </label>
+    <input type="range" id="lift-slider" min="0" max="8" step="0.5" value="4">
+    <label style="margin-top:10px;">
+      <span>X velocity gain</span>
+      <span id="gainx-value">1.5</span>x
+    </label>
+    <input type="range" id="gainx-slider" min="1" max="2.5" step="0.1" value="1.5">
+  </div>
+
+  <div id="drag-layer"></div>
+
+  <!-- ===== SHOP MODAL ===== -->
+  <div class="scrim" id="shop-scrim">
+    <div class="modal" id="shop-modal">
+      <div class="modal-head">
+        <h2>Shop</h2>
+        <button class="close" data-close="shop-scrim">&times;</button>
+      </div>
+      <p class="modal-sub">Earn coins by clearing lines and finishing objectives. The first skin is cheap on purpose — see the loop work.</p>
+      <div id="shop-body"></div>
+    </div>
+  </div>
+
+  <!-- ===== SESSION SUMMARY MODAL ===== -->
+  <div class="scrim" id="summary-scrim">
+    <div class="modal" id="summary-modal">
+      <div class="modal-head">
+        <h2>This Session</h2>
+        <button class="close" data-close="summary-scrim">&times;</button>
+      </div>
+      <p class="modal-sub">Live tuning data — this is how we set skin prices against the real earn rate.</p>
+      <div id="summary-body"></div>
+    </div>
+  </div>
+
+<script>
+"use strict";
+
+/* =====================================================================
+   CONFIG  — the knobs worth touching first
+   ===================================================================== */
+const GRID_SIZE   = 8;
+const OBJ_TILES   = 3;     // how many glowing target tiles per objective
+
+/* COIN ECONOMY — coins come from OUTCOMES, not deliberation. Tidy
+   placement pays nothing — the red flash on a sealed-hole placement is
+   pure feedback ("you made a hole"), not a coin-or-no-coin gate. Real
+   income comes entirely from clears and objectives, both scaled by the
+   streak multiplier. Earlier builds paid a small tidy coin and it kept
+   creeping back to ~25% of income — a flat trickle in disguise — so
+   it's been removed. Reward the result, not the time spent thinking. */
+const COIN_TIDY   = 0;     // tidy placement pays nothing (kept as a knob)
+const COIN_LINE   = 6;     // per cleared line        (multiplied by streak)
+const COIN_COMBO  = 10;    // bonus per extra line in one placement (multiplied)
+const COIN_OBJ    = 40;    // bonus for completing an objective (multiplied)
+
+/* MODE_MULT — flat multiplier on ALL coin income, set per mode.
+   Relax = 1. When Challenge mode is built, its per-clear rate stays at
+   1x (no farming advantage mid-play) and the 2x/3x reward instead comes
+   from a LEVEL-COMPLETION bonus — so this stays 1 there too, and the
+   completion bonus is applied separately. Hook is wired now so the
+   structure is ready; today it's always 1. */
+let MODE_MULT = 1;
+
+/* STREAK: consecutive piece placements that each clear >=1 line build the
+   multiplier. A placement that clears nothing resets it to x1. This is the
+   mechanic that makes a skilled session worth more than a careless one. */
+const STREAK_STEP = 0.5;   // multiplier added per streak level
+const STREAK_MAX  = 5;     // cap (x1 .. x5)
+
+/* TOUCH_LIFT — how many cells above the finger the floating piece sits,
+   so your thumb doesn't cover the landing spot. Only applies on touch
+   input (mouse drags 1:1). Default 4 cells — finger sits just below the
+   grid, piece floats clearly above. */
+let TOUCH_LIFT = 4;
+
+/* TOUCH_GAIN_X — horizontal velocity gain on touch drags. 1.0 = pure
+   1:1 (the piece moves exactly with your finger). 1.5 means a small
+   horizontal thumb motion sends the piece 1.5x as far. The purpose is
+   to make the piece "outrun" the finger sideways so accidental drops
+   into the hold slot during normal placement drags become much harder
+   — by the time your finger swings toward hold, the piece is already
+   past it. This is genuine velocity gain, NOT a static offset: the
+   piece sits exactly on your finger when you grab it, and scales away
+   from your grab point as you move. Vertical Y stays 1:1; only X is
+   scaled. Tunable live via the X-gain slider on phone.
+   IMPORTANT: the ghost preview applies the SAME scaling, so what you
+   see is what gets placed — finger drives intent, but intent is
+   "the spot the scaled piece is showing." */
+let TOUCH_GAIN_X = 1.5;
+
+/* SKINS ---------------------------------------------------------------
+   Two kinds for now: "blocks" (recolors every placed piece) and "bg"
+   (changes the board well + page backdrop). `cost` 0 = owned by default.
+   Prices follow the curve we discussed: first one cheap to teach the
+   loop, then climbing steeply. Tune freely against Session Stats data. */
+const SKINS = {
+  blocks: [
+    { id:"blocks_default", name:"Classic",  cost:0,
+      colors:["#c98b8b","#9caf88","#d6a35c","#8298b0","#c47e5a","#a98aa9"] },
+    { id:"blocks_candy",   name:"Candy",    cost:450,
+      colors:["#f08fb0","#f6c177","#8fd3c8","#9db8f0","#c79be6","#f29e8e"] },
+    { id:"blocks_forest",  name:"Forest",   cost:1200,
+      colors:["#6f9f6a","#9bbf6d","#c2a25a","#5f8f7d","#8a6f4a","#aabf86"] },
+    { id:"blocks_neon",    name:"Neon",     cost:3000,
+      colors:["#ff5d8f","#5dffce","#ffe45d","#5db8ff","#c45dff","#ff8a5d"] },
+  ],
+  bg: [
+    { id:"bg_default", name:"Ember",   cost:0,
+      well:"#221b17", page:"#1c1714", glow1:"#2c2218", glow2:"#241c2a" },
+    { id:"bg_dusk",    name:"Dusk",    cost:600,
+      well:"#1d1d2a", page:"#15151f", glow1:"#2a2440", glow2:"#3a2a3a" },
+    { id:"bg_mint",    name:"Sea",     cost:1800,
+      well:"#16241f", page:"#101a16", glow1:"#1d3a30", glow2:"#1a2a3a" },
+  ],
+};
+
+/* Active palette — points at the equipped block skin's colors.
+   dealPiece() reads from this, so equipping a skin re-colors new pieces. */
+let COLORS = SKINS.blocks[0].colors.slice();
+
+/* Piece shapes as coordinate lists [row,col], normalized to top-left.
+   `w` is a rough rarity weight — higher = appears more often.
+   Relax mode leans on small/medium pieces, so those carry more weight. */
+const PIECES = [
+  { name:"dot",    cells:[[0,0]],                                  w:5 },
+  { name:"d2h",    cells:[[0,0],[0,1]],                            w:8 },
+  { name:"d2v",    cells:[[0,0],[1,0]],                            w:8 },
+  { name:"d3h",    cells:[[0,0],[0,1],[0,2]],                      w:8 },
+  { name:"d3v",    cells:[[0,0],[1,0],[2,0]],                      w:8 },
+  { name:"d4h",    cells:[[0,0],[0,1],[0,2],[0,3]],                w:4 },
+  { name:"d4v",    cells:[[0,0],[1,0],[2,0],[3,0]],                w:4 },
+  { name:"sq2",    cells:[[0,0],[0,1],[1,0],[1,1]],                w:7 },
+  /* Small 3-cell corners — four rotations of the same shape. Weight
+     dropped from 7 to 5 each (was 25.7% of deals, now 19.5%). User
+     testing flagged these as appearing too often AND being awkward —
+     they leave little L-shaped gaps that are hard to fill cleanly,
+     which kept producing strand-flashes. Still the biggest single
+     cluster in the deck, just less dominant. */
+  { name:"cornS",  cells:[[0,0],[1,0],[1,1]],                      w:5 },
+  { name:"cornS2", cells:[[0,0],[0,1],[1,0]],                      w:5 },
+  { name:"cornS3", cells:[[0,1],[1,0],[1,1]],                      w:5 },
+  { name:"cornS4", cells:[[0,0],[0,1],[1,1]],                      w:5 },
+  { name:"Tee",    cells:[[0,0],[0,1],[0,2],[1,1]],                w:5 },
+  { name:"Lbig",   cells:[[0,0],[1,0],[2,0],[2,1]],                w:3 },
+  /* The three other rotations of Lbig. Each is the same 4-cell L shape
+     turned 90° — added because a corner piece is only useful at the
+     corner it points toward, so all four orientations earn their place
+     in the deck (this is one of the rare cases where rotation genuinely
+     changes the strategic role). Same weight as Lbig itself. */
+  { name:"Lbig_R", cells:[[0,0],[0,1],[0,2],[1,0]],                w:3 },
+  { name:"Lbig_2", cells:[[0,0],[0,1],[1,1],[2,1]],                w:3 },
+  { name:"Lbig_L", cells:[[0,2],[1,0],[1,1],[1,2]],                w:3 },
+  { name:"Jbig",   cells:[[0,1],[1,1],[2,1],[2,0]],                w:3 },
+  { name:"d5h",    cells:[[0,0],[0,1],[0,2],[0,3],[0,4]],          w:2 },
+  { name:"d5v",    cells:[[0,0],[1,0],[2,0],[3,0],[4,0]],          w:2 },
+  { name:"sq3",    cells:[[0,0],[0,1],[0,2],[1,0],[1,1],[1,2],[2,0],[2,1],[2,2]], w:1 },
+
+  /* --- NEW PIECES — each fills a real gap, not just zoo variety ---- */
+
+  /* Big corner (5-cell L). The existing Lbig is 4 cells; this is the
+     full 3x3 corner. Eats a corner of the board — great for veterans
+     who've worked themselves into a tight spot. Rare (w:2). */
+  { name:"bigCorner",  cells:[[0,0],[1,0],[2,0],[2,1],[2,2]],      w:2 },
+
+  /* S-bend (zig). No straight option — placement is a real decision,
+     not a fill-anywhere piece. Adds genuine strategic depth. */
+  { name:"sBend",      cells:[[0,1],[0,2],[1,0],[1,1]],            w:4 },
+
+  /* Plus / cross. Distinctive, useful for stitching the middle of a
+     board, visually fun. Five cells, rare (w:2). */
+  { name:"plus",       cells:[[0,1],[1,0],[1,1],[1,2],[2,1]],      w:2 },
+
+  /* 2x3 rectangle. Fills the size gap between the 2x2 and 3x3 squares.
+     Six cells, so it's a commitment — w:2 keeps it from dominating. */
+  { name:"rect2x3",    cells:[[0,0],[0,1],[0,2],[1,0],[1,1],[1,2]], w:2 },
+];
+
+/* =====================================================================
+   STATE
+   ===================================================================== */
+let grid = [];          // GRID_SIZE x GRID_SIZE, each cell null or color string
+let targets = [];       // array of "r,c" strings — current objective tiles
+let objCleared = 0;     // glowing tiles cleared toward current objective
+let coins = 0;
+let tray = [];          // 3 slots; each is a piece {shape,color,id} or null
+let held = null;        // the one piece in the hold slot, or null. NOT swappable:
+                        // once full it stays full until the held piece is placed.
+let busy = false;       // true during clear animations — blocks input
+let pieceId = 0;
+
+/* streak: how many placements in a row have cleared at least one line */
+let streak = 0;         // 0 = no streak; multiplier = 1 + streak*STREAK_STEP
+
+/* ONBOARDING DEAL — the first ONBOARDING_LENGTH placements after the
+   board is fully empty draw from a restricted "easy" pool (small,
+   forgiving shapes only — no awkward L rotations, no plus, no big
+   corner, no 3x3 etc). The goal isn't to "give away" coins; it's to
+   teach the row/column-clear mechanic without the player realizing
+   they're being taught. Triggers per Option C (Definition 1): when
+   the BOARD IS LITERALLY EMPTY and the counter is at 0, it resets to
+   ONBOARDING_LENGTH. This is "onboarding," not "easy mode" — same
+   thing fires in Relax and (eventually) Challenge. In production this
+   would also persist across sessions; here it re-scripts on reload,
+   which is useful for testing.
+   "Easy" pool = pieces with weight >= 5 in the main PIECES array. That's
+   the dots, 2- and 3-cell straights, the 2x2 square, the small corners,
+   and the T. The weighting WITHIN the easy pool still uses each piece's
+   normal weight, so common stays common, uncommon stays uncommon. */
+const ONBOARDING_LENGTH = 15;
+const ONBOARDING_MIN_WEIGHT = 5;
+let onboardingLeft = ONBOARDING_LENGTH;     // starts on, counts down with placements
+
+/* skins: which skin ids the player owns, and which are equipped */
+let ownedSkins = new Set(["blocks_default", "bg_default"]);
+let equipped = { blocks: "blocks_default", bg: "bg_default" };
+
+/* session stats — pure tuning data, shown in the Session Stats modal */
+let stats = {
+  startTime: Date.now(),
+  coinsEarned: 0,
+  piecesPlaced: 0,
+  linesCleared: 0,
+  objectivesDone: 0,
+  bestStreak: 0,
+  holesSealed: 0,         // placements that sealed a 1-cell hole (paid nothing)
+};
+
+/* =====================================================================
+   DOM REFS
+   ===================================================================== */
+const boardEl   = document.getElementById("board");
+const trayEl    = document.getElementById("tray");
+const coinsEl   = document.getElementById("coins");
+const coinCount = document.getElementById("coin-count");
+const objProg   = document.getElementById("obj-prog");
+const dragLayer = document.getElementById("drag-layer");
+const toastEl   = document.getElementById("toast");
+const streakEl  = document.getElementById("streak");
+const streakX   = document.getElementById("streak-x");
+const shopBody  = document.getElementById("shop-body");
+const summaryBody = document.getElementById("summary-body");
+const holdEl    = document.getElementById("hold");
+const holdWell  = document.getElementById("hold-well");
+
+/* =====================================================================
+   SETUP
+   ===================================================================== */
+function init() {
+  // build empty grid model
+  grid = Array.from({length: GRID_SIZE}, () => Array(GRID_SIZE).fill(null));
+
+  // build board DOM
+  boardEl.innerHTML = "";
+  for (let r = 0; r < GRID_SIZE; r++) {
+    for (let c = 0; c < GRID_SIZE; c++) {
+      const cell = document.createElement("div");
+      cell.className = "cell";
+      cell.dataset.r = r;
+      cell.dataset.c = c;
+      boardEl.appendChild(cell);
+    }
+  }
+
+  sizeBoard();
+  applyBackgroundSkin();   // paint the equipped bg before first render
+  newObjective();
+  dealTray();
+  render();
+  bindUI();
+}
+
+/* modal open/close + shop/summary buttons */
+function bindUI() {
+  document.getElementById("open-shop").addEventListener("click", () => {
+    renderShop();
+    document.getElementById("shop-scrim").classList.add("open");
+  });
+  document.getElementById("open-summary").addEventListener("click", () => {
+    renderSummary();
+    document.getElementById("summary-scrim").classList.add("open");
+  });
+  // any [data-close] button, or clicking the dim scrim itself, closes
+  document.querySelectorAll(".scrim").forEach(scrim => {
+    scrim.addEventListener("click", e => {
+      if (e.target === scrim || e.target.dataset.close) {
+        scrim.classList.remove("open");
+      }
+    });
+  });
+
+  // The hold well is its own grab target — same approach as tray slots,
+  // so tapping anywhere in the well picks up the held piece (no need to
+  // hit a sub-cell). Handler reads `held` live at click-time.
+  holdWell.addEventListener("pointerdown", e => {
+    if (!held) return;
+    const pieceEl = holdWell.firstChild;
+    if (pieceEl) startDrag(e, held, pieceEl);
+  });
+
+  // Debug sliders — touch lift AND horizontal offset. Both live in the
+  // same panel, both invisible until the first touch event reveals them.
+  // Tunable mid-drag on phone so you can find values that feel right.
+  const liftSlider = document.getElementById("lift-slider");
+  const liftValue  = document.getElementById("lift-value");
+  const liftWrap   = document.getElementById("lift-slider-wrap");
+  liftSlider.addEventListener("input", () => {
+    TOUCH_LIFT = parseFloat(liftSlider.value);
+    liftValue.textContent = liftSlider.value;
+  });
+  const gainxSlider = document.getElementById("gainx-slider");
+  const gainxValue  = document.getElementById("gainx-value");
+  gainxSlider.addEventListener("input", () => {
+    TOUCH_GAIN_X = parseFloat(gainxSlider.value);
+    gainxValue.textContent = gainxSlider.value;
+  });
+  window.addEventListener("touchstart", () => {
+    liftWrap.classList.add("show");
+  }, { once: true, passive: true });
+}
+
+/* Make the board fit the screen, then publish the real cell size to CSS
+   so the floating drag-piece lines up pixel-perfect with the grid. */
+function sizeBoard() {
+  const maxW = Math.min(window.innerWidth - 28, 460);
+  const gap = 4;
+  const cell = Math.floor((maxW - gap * (GRID_SIZE + 1)) / GRID_SIZE);
+  document.documentElement.style.setProperty("--cell-size", cell + "px");
+}
+window.addEventListener("resize", () => { sizeBoard(); });
+
+/* =====================================================================
+   OBJECTIVE  — pick OBJ_TILES random empty cells to "glow".
+   The constraint: you have to route a row/column clear THROUGH them.
+   In relax mode there's no penalty for taking your time.
+   ===================================================================== */
+function newObjective() {
+  objCleared = 0;
+  targets = [];
+  const empties = [];
+  for (let r = 0; r < GRID_SIZE; r++)
+    for (let c = 0; c < GRID_SIZE; c++)
+      if (!grid[r][c]) empties.push(r + "," + c);
+
+  // shuffle, take a few
+  for (let i = empties.length - 1; i > 0; i--) {
+    const j = (Math.random() * (i + 1)) | 0;
+    [empties[i], empties[j]] = [empties[j], empties[i]];
+  }
+  targets = empties.slice(0, Math.min(OBJ_TILES, empties.length));
+}
+
+/* =====================================================================
+   TRAY  — three pieces at a time. Must place all three before
+   the next three are dealt (the Block Blast rhythm).
+   ===================================================================== */
+function dealTray() {
+  tray = [dealPiece(), dealPiece(), dealPiece()];
+  // relax mode: if not one of the three can be placed anywhere, quietly
+  // redeal instead of ending the game.
+  let safety = 0;
+  while (!trayHasMove() && safety++ < 20) {
+    tray = [dealPiece(), dealPiece(), dealPiece()];
+  }
+}
+
+function dealPiece() {
+  // While onboarding is active, draw only from the easy pool — small,
+  // forgiving shapes that virtually always fit somewhere and reliably
+  // create row/column clear opportunities. Once onboardingLeft hits 0
+  // we fall through to the full PIECES deck. Within the easy pool we
+  // keep each piece's normal weight, so the relative frequencies are
+  // the same; we're just clipping off the hard pieces.
+  const pool = onboardingLeft > 0
+    ? PIECES.filter(p => p.w >= ONBOARDING_MIN_WEIGHT)
+    : PIECES;
+  const total = pool.reduce((s, p) => s + p.w, 0);
+  let roll = Math.random() * total;
+  let shape = pool[0];
+  for (const p of pool) { if ((roll -= p.w) <= 0) { shape = p; break; } }
+  return {
+    id: ++pieceId,
+    shape,
+    color: COLORS[(Math.random() * COLORS.length) | 0],
+  };
+}
+
+/* can ANY remaining piece be placed ANYWHERE — across the tray AND
+   the hold slot? Tray may contain nulls (already-placed slots); held
+   may be null. Either being placeable is enough to avoid a redeal. */
+function trayHasMove() {
+  if (held && pieceFits(held)) return true;
+  return tray.some(p => p && pieceFits(p));
+}
+function pieceFits(piece) {
+  for (let r = 0; r < GRID_SIZE; r++)
+    for (let c = 0; c < GRID_SIZE; c++)
+      if (canPlace(piece.shape, r, c)) return true;
+  return false;
+}
+
+/* =====================================================================
+   PLACEMENT RULES
+   ===================================================================== */
+function canPlace(shape, originR, originC) {
+  for (const [dr, dc] of shape.cells) {
+    const r = originR + dr, c = originC + dc;
+    if (r < 0 || c < 0 || r >= GRID_SIZE || c >= GRID_SIZE) return false;
+    if (grid[r][c]) return false;
+  }
+  return true;
+}
+
+/* Is cell (r,c) a "hole" — a single EMPTY cell sealed on all four sides?
+   A side counts as sealed if it's a filled cell OR the board edge.
+   This is the deliberately-strict, unambiguous definition: only true
+   1-tile pockets count, so the player can always look at the board and
+   see exactly why a placement was flagged. No fuzziness. */
+function isHole(r, c) {
+  if (grid[r][c]) return false;          // not empty -> not a hole
+  const sides = [[-1,0],[1,0],[0,-1],[0,1]];
+  for (const [dr, dc] of sides) {
+    const nr = r + dr, nc = c + dc;
+    const offBoard = nr < 0 || nc < 0 || nr >= GRID_SIZE || nc >= GRID_SIZE;
+    if (!offBoard && !grid[nr][nc]) return false;  // an open side -> not sealed
+  }
+  return true;                           // every side sealed
+}
+
+/* After a placement, find empty cells it SEALED. We only need to check
+   cells orthogonally adjacent to the just-placed piece — a placement
+   can't seal a cell it doesn't touch. */
+function holesCreatedBy(placedCells) {
+  const checked = new Set();
+  const holes = [];
+  const sides = [[-1,0],[1,0],[0,-1],[0,1]];
+  for (const [r, c] of placedCells) {
+    for (const [dr, dc] of sides) {
+      const nr = r + dr, nc = c + dc;
+      if (nr < 0 || nc < 0 || nr >= GRID_SIZE || nc >= GRID_SIZE) continue;
+      const key = nr + "," + nc;
+      if (checked.has(key)) continue;
+      checked.add(key);
+      if (isHole(nr, nc)) holes.push([nr, nc]);
+    }
+  }
+  return holes;
+}
+
+/* commit a piece to the grid model + handle clears, coins, objective */
+function placePiece(piece, originR, originC) {
+  const placed = [];
+  for (const [dr, dc] of piece.shape.cells) {
+    const r = originR + dr, c = originC + dc;
+    grid[r][c] = piece.color;
+    placed.push([r, c]);
+  }
+  stats.piecesPlaced++;
+  if (onboardingLeft > 0) onboardingLeft--;   // tick down onboarding window
+
+  // Clear the placed piece's SLOT in place (set to null) rather than
+  // filtering the array. This keeps every other piece at its original
+  // index, so slot 1 stays slot 1 and nothing jumps. Redeal happens in
+  // afterTurn() once all three slots are null.
+  const slotIndex = tray.findIndex(p => p && p.id === piece.id);
+  if (slotIndex !== -1) tray[slotIndex] = null;
+
+  render();
+  // mark the freshly placed cells so they "settle" in
+  placed.forEach(([r, c]) => cellAt(r, c).classList.add("settle"));
+
+  // find full rows / columns
+  const fullRows = [], fullCols = [];
+  for (let r = 0; r < GRID_SIZE; r++)
+    if (grid[r].every(Boolean)) fullRows.push(r);
+  for (let c = 0; c < GRID_SIZE; c++) {
+    let full = true;
+    for (let r = 0; r < GRID_SIZE; r++) if (!grid[r][c]) { full = false; break; }
+    if (full) fullCols.push(c);
+  }
+
+  // --- PLACEMENT COINS -------------------------------------------------
+  // A placement that clears a line is "good" by definition — its payout
+  // comes from the clear, handled below, so we don't also judge tidiness.
+  // A placement that clears nothing is judged: tidy (strands nothing) pays
+  // a tiny coin; sealing a 1-cell hole pays zero and flashes the cell red.
+  if (!fullRows.length && !fullCols.length) {
+    const holes = holesCreatedBy(placed);
+    if (holes.length === 0) {
+      awardCoins(COIN_TIDY);                       // clean move — small reward
+    } else {
+      // sealed a hole -> no coins, flash each stranded cell red
+      holes.forEach(([r, c]) => {
+        const el = cellAt(r, c);
+        el.classList.remove("stranded");
+        void el.offsetWidth;
+        el.classList.add("stranded");
+        setTimeout(() => el.classList.remove("stranded"), 900);
+      });
+      stats.holesSealed++;
+    }
+  }
+
+  if (fullRows.length || fullCols.length) {
+    // this placement cleared something -> streak grows
+    streak = Math.min(streak + 1, STREAK_MAX);
+    stats.bestStreak = Math.max(stats.bestStreak, streak);
+    clearLines(fullRows, fullCols);
+  } else {
+    // placement cleared nothing -> streak breaks
+    if (streak > 0) toast("Streak broken");
+    streak = 0;
+    updateStreakBadge();
+    afterTurn();
+  }
+}
+
+/* current coin multiplier from the streak (x1 at streak 0) */
+function streakMult() {
+  return 1 + streak * STREAK_STEP;
+}
+
+/* repaint the streak badge to match current multiplier */
+function updateStreakBadge() {
+  const m = streakMult();
+  streakX.textContent = "x" + (m % 1 === 0 ? m : m.toFixed(1));
+  streakEl.classList.toggle("active", streak > 0);
+  // hotter streak -> hotter color
+  const heat = ["#e08a5c","#e8a04c","#ef8f5e","#f06d4e","#ff5d4d","#ff4d6d"];
+  streakEl.style.setProperty("--streak", heat[Math.min(streak, heat.length - 1)]);
+  streakEl.classList.remove("bump");
+  void streakEl.offsetWidth;
+  streakEl.classList.add("bump");
+}
+
+/* animate + remove cleared lines, then score */
+function clearLines(rows, cols) {
+  busy = true;
+  const toClear = new Set();
+  rows.forEach(r => { for (let c = 0; c < GRID_SIZE; c++) toClear.add(r + "," + c); });
+  cols.forEach(c => { for (let r = 0; r < GRID_SIZE; r++) toClear.add(r + "," + c); });
+
+  // count how many objective tiles are in this clear
+  let objHits = 0;
+  toClear.forEach(key => { if (targets.includes(key)) objHits++; });
+
+  // visual: pop the clearing cells
+  toClear.forEach(key => {
+    const [r, c] = key.split(",").map(Number);
+    cellAt(r, c).classList.add("clearing");
+  });
+
+  const lines = rows.length + cols.length;
+  stats.linesCleared += lines;
+
+  // streak multiplier applies to clear-based coins (not flat placement coins)
+  const mult = streakMult();
+  const base = lines * COIN_LINE + Math.max(0, lines - 1) * COIN_COMBO;
+  awardCoins(Math.round(base * mult));
+
+  updateStreakBadge();
+
+  // feedback: show combo and/or the active multiplier
+  if (lines >= 2 && streak > 1) {
+    toast(lines + " lines · x" + (mult % 1 === 0 ? mult : mult.toFixed(1)) + " streak!");
+  } else if (lines >= 2) {
+    toast(lines + " lines! +" + (lines - 1) + " combo");
+  } else if (streak > 1) {
+    toast("x" + (mult % 1 === 0 ? mult : mult.toFixed(1)) + " streak");
+  }
+
+  setTimeout(() => {
+    // wipe from model AND strip the transient 'clearing' class — otherwise
+    // the cell keeps the finished clearpop animation (opacity:0) forever and
+    // the row looks permanently gone even though it's free again.
+    toClear.forEach(key => {
+      const [r, c] = key.split(",").map(Number);
+      grid[r][c] = null;
+      cellAt(r, c).classList.remove("clearing");
+    });
+    // objective progress
+    if (objHits > 0) {
+      objCleared += objHits;
+      // drop completed targets
+      targets = targets.filter(key => {
+        const [r, c] = key.split(",").map(Number);
+        return grid[r][c] !== null || !wasCleared(key, toClear);
+      });
+      // simpler: remove any target that was in the clear set
+      targets = targets.filter(key => !toClear.has(key));
+      if (targets.length === 0) {
+        awardCoins(Math.round(COIN_OBJ * mult));   // objective bonus also scales
+        stats.objectivesDone++;
+        toast("Objective complete! +" + Math.round(COIN_OBJ * mult));
+        newObjective();
+      }
+    }
+    busy = false;
+    render();
+    // Option C re-script trigger (Definition 1: literally empty board).
+    // If the clears we just resolved wiped the board completely AND the
+    // onboarding window has already been used up, reset it so a true
+    // fresh-slate moment gets the easy-pool deal again. This mirrors
+    // how new players experience their very first session, every time
+    // the player actually starts over. We do NOT reset onboardingLeft
+    // mid-window — only after it's gone to 0 — so consecutive empty
+    // states during the opening don't keep re-arming it.
+    if (onboardingLeft === 0) {
+      const boardEmpty = grid.every(row => row.every(c => !c));
+      if (boardEmpty) onboardingLeft = ONBOARDING_LENGTH;
+    }
+    afterTurn();
+  }, 430);
+}
+function wasCleared(key, set) { return set.has(key); }
+
+/* runs after every placement (and after clears resolve) */
+function afterTurn() {
+  const allPlaced = tray.every(p => p === null);
+  if (allPlaced) {
+    dealTray();                       // full set used -> deal the next three
+  } else if (!trayHasMove()) {
+    // relax mode: the pieces still sitting in the tray don't fit anywhere
+    // -> gentle redeal, no punishment, no game over
+    toast("No room — fresh pieces");
+    dealTray();
+  }
+  render();
+}
+
+/* =====================================================================
+   COINS / TOAST
+   ===================================================================== */
+function awardCoins(n) {
+  // MODE_MULT is the per-mode flat multiplier (Relax=1). Applying it here
+  // means every coin source — tidy, line, combo, objective — respects the
+  // mode automatically, with no caller needing to know about it.
+  const gained = Math.round(n * MODE_MULT);
+  coins += gained;
+  stats.coinsEarned += gained;
+  coinCount.textContent = coins;
+  coinsEl.classList.remove("bump");
+  void coinsEl.offsetWidth;       // restart animation
+  coinsEl.classList.add("bump");
+}
+let toastTimer = null;
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove("show"), 1600);
+}
+
+/* =====================================================================
+   RENDER  — paint grid + tray from the model
+   ===================================================================== */
+function cellAt(r, c) {
+  return boardEl.children[r * GRID_SIZE + c];
+}
+
+function render() {
+  // grid
+  for (let r = 0; r < GRID_SIZE; r++) {
+    for (let c = 0; c < GRID_SIZE; c++) {
+      const el = cellAt(r, c);
+      const color = grid[r][c];
+      // preserve transient animation classes
+      el.className = "cell"
+        + (el.classList.contains("settle") ? " settle" : "")
+        + (el.classList.contains("clearing") ? " clearing" : "")
+        + (el.classList.contains("stranded") ? " stranded" : "");
+      el.style.background = "";
+      el.innerHTML = "";
+      if (color) {
+        el.classList.add("filled");
+        el.style.background = color;
+      }
+      if (targets.includes(r + "," + c)) {
+        const t = document.createElement("div");
+        t.className = "target";
+        el.appendChild(t);
+      }
+    }
+  }
+  // clean up settle class after it plays
+  setTimeout(() => {
+    boardEl.querySelectorAll(".settle").forEach(e => e.classList.remove("settle"));
+  }, 280);
+
+  // objective progress text
+  objProg.textContent = (OBJ_TILES - targets.length) + " / " + OBJ_TILES;
+
+  // tray — slots are POSITIONAL and STABLE. tray[i] may be null (already
+  // placed); the other pieces must NOT shift to fill the gap. We only
+  // rebuild a slot whose contents actually changed, so an untouched piece
+  // keeps its exact DOM node (and never visually jumps).
+  for (let i = 0; i < 3; i++) {
+    let slot = trayEl.children[i];
+    if (!slot) {
+      slot = document.createElement("div");
+      slot.className = "tray-slot";
+      trayEl.appendChild(slot);
+      // pointerdown on the SLOT (not the piece) — that makes the whole
+      // slot rectangle the grab target, so the player doesn't have to
+      // hit a tiny 24px sub-cell. Reads tray[i] live at click-time so
+      // a slot freshly refilled is grabbable on its first click.
+      slot.addEventListener("pointerdown", e => {
+        const piece = tray[i];
+        if (!piece) return;
+        const pieceEl = slot.firstChild;
+        if (pieceEl) startDrag(e, piece, pieceEl);
+      });
+    }
+    const piece = tray[i];
+    const currentId = slot.firstChild ? slot.firstChild.dataset.pieceId : null;
+    const wantId = piece ? String(piece.id) : null;
+    if (currentId !== wantId) {           // contents changed -> rebuild just this slot
+      slot.innerHTML = "";
+      if (piece) slot.appendChild(buildPieceEl(piece));
+    }
+  }
+
+  // hold slot — same stable-rebuild approach: only rebuild when the held
+  // piece actually changes. Empty class drives the dashed placeholder.
+  const heldCurrentId = holdWell.firstChild ? holdWell.firstChild.dataset.pieceId : null;
+  const heldWantId = held ? String(held.id) : null;
+  if (heldCurrentId !== heldWantId) {
+    holdWell.innerHTML = "";
+    if (held) holdWell.appendChild(buildPieceEl(held));
+  }
+  holdEl.classList.toggle("empty", held === null);
+}
+
+/* build the small grabbable piece element shown in the tray */
+function buildPieceEl(piece) {
+  const cells = piece.shape.cells;
+  const maxR = Math.max(...cells.map(c => c[0]));
+  const maxC = Math.max(...cells.map(c => c[1]));
+  const el = document.createElement("div");
+  el.className = "piece";
+  el.style.gridTemplateColumns = `repeat(${maxC + 1}, 24px)`;
+  el.style.gridTemplateRows = `repeat(${maxR + 1}, 24px)`;
+  el.dataset.pieceId = piece.id;
+
+  const filledSet = new Set(cells.map(([r, c]) => r + "," + c));
+  for (let r = 0; r <= maxR; r++) {
+    for (let c = 0; c <= maxC; c++) {
+      const pc = document.createElement("div");
+      const on = filledSet.has(r + "," + c);
+      pc.className = "piece-cell " + (on ? "on" : "off");
+      if (on) {
+        pc.style.background = piece.color;
+      }
+      el.appendChild(pc);
+    }
+  }
+  // NOTE: no pointerdown here anymore. The whole tray-slot / hold-well
+  // is the click target now (see the render loop). That makes the
+  // hitbox the full slot rectangle, so tapping near a piece picks it
+  // up — no need to hit a tiny 24px sub-cell.
+  return el;
+}
+
+/* =====================================================================
+   DRAG & DROP  — pointer events cover mouse + touch in one path
+   ===================================================================== */
+let drag = null;  // { piece, grabDR, grabDC, floatEl, liftPx }
+
+function startDrag(e, piece, pieceEl) {
+  if (busy) return;
+  e.preventDefault();
+
+  // Grab anchor = the piece's CENTER OF MASS (rounded to a filled sub-cell).
+  // Old behavior anchored to whichever sub-cell was clicked, which only
+  // worked if you tapped exactly on a filled cell. Now the whole slot is
+  // the hitbox, so there isn't always a sub-cell under the cursor — and
+  // anchoring to the centroid gives a consistent, predictable feel: the
+  // piece always floats balanced under your finger.
+  const cells = piece.shape.cells;
+  const avgR = cells.reduce((s, [r]) => s + r, 0) / cells.length;
+  const avgC = cells.reduce((s, [, c]) => s + c, 0) / cells.length;
+  // pick the filled cell closest to the centroid
+  let grabDR = cells[0][0], grabDC = cells[0][1], bestD = Infinity;
+  for (const [r, c] of cells) {
+    const d = (r - avgR) ** 2 + (c - avgC) ** 2;
+    if (d < bestD) { bestD = d; grabDR = r; grabDC = c; }
+  }
+
+  pieceEl.classList.add("lifted");
+  // Lock page scrolling globally for the duration of the drag. This is
+  // the belt-and-braces layer on top of touch-action — any element the
+  // finger drifts over during the drag will also stop being scrollable.
+  document.documentElement.classList.add("dragging");
+
+  // build the full-size floating clone (reuses `cells` from the centroid calc above)
+  const maxR = Math.max(...cells.map(c => c[0]));
+  const maxC = Math.max(...cells.map(c => c[1]));
+  const cs = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--cell-size"));
+  const gap = 4;
+
+  const floatEl = document.createElement("div");
+  floatEl.className = "floating";
+  floatEl.style.gridTemplateColumns = `repeat(${maxC + 1}, ${cs}px)`;
+  floatEl.style.gridTemplateRows = `repeat(${maxR + 1}, ${cs}px)`;
+  const filledSet = new Set(cells.map(([r, c]) => r + "," + c));
+  for (let r = 0; r <= maxR; r++) {
+    for (let c = 0; c <= maxC; c++) {
+      const fc = document.createElement("div");
+      const on = filledSet.has(r + "," + c);
+      fc.className = "fc " + (on ? "on" : "off");
+      if (on) fc.style.background = piece.color;
+      floatEl.appendChild(fc);
+    }
+  }
+  dragLayer.appendChild(floatEl);
+
+  // on touch, lift the piece TOUCH_LIFT cells above the finger so it's
+  // visible. Vertical Y stays 1:1; horizontal X gets a velocity gain
+  // (TOUCH_GAIN_X) applied to the delta from where the drag STARTED —
+  // so the piece sits exactly on your finger when you grab it, then
+  // amplifies sideways motion away from that point. This is what makes
+  // small thumb wiggles "outrun" the finger horizontally and dodge the
+  // hold slot during normal placement drags.
+  const isTouch = e.pointerType === "touch";
+  const liftPx = isTouch ? cs * TOUCH_LIFT : 0;
+  const startX = e.clientX;                          // grab origin (fixed for the drag)
+
+  // where did this piece come from? a tray slot, or the hold slot?
+  // (a piece dragged FROM hold can only be placed on the board — it can't
+  // be re-held, since hold isn't swappable and is already empty once you
+  // pick its piece up... but tagging it keeps onDragEnd unambiguous.)
+  const source = pieceEl.closest("#hold-well") ? "hold" : "tray";
+
+  drag = { piece, pieceEl, grabDR, grabDC, floatEl, cs, gap, liftPx, isTouch, startX, maxR, maxC, source };
+
+  window.addEventListener("pointermove", onDragMove);
+  window.addEventListener("pointerup", onDragEnd);
+  window.addEventListener("pointercancel", onDragEnd);
+  // Final scroll defense: some older Safari builds will still scroll
+  // even with touch-action: none. preventDefault on a non-passive
+  // touchmove listener is the only sure block. Attached only during
+  // a drag so it doesn't bog down normal page scrolling.
+  window.addEventListener("touchmove", blockTouchScroll, { passive: false });
+
+  onDragMove(e); // position immediately
+}
+function blockTouchScroll(e) { e.preventDefault(); }
+
+function onDragMove(e) {
+  if (!drag) return;
+  const { piece, grabDR, grabDC, floatEl, cs, gap, liftPx, isTouch, startX } = drag;
+
+  // VELOCITY GAIN ON X: effectiveX is what we use in place of the raw
+  // finger X. At drag-start, effectiveX === startX (the piece sits
+  // exactly on your finger). As your finger moves away from startX,
+  // effectiveX moves gainX times as far in the same direction. Y stays
+  // 1:1; only the horizontal axis is scaled.
+  // Read TOUCH_GAIN_X from the global each frame so sliding the debug
+  // slider mid-drag affects the active drag in real time.
+  const gainX = isTouch ? TOUCH_GAIN_X : 1;
+  const effectiveX = startX + (e.clientX - startX) * gainX;
+
+  // position the floating clone so the grabbed sub-cell sits under the
+  // (virtual) pointer position, then apply the vertical lift
+  const cellStride = cs + gap;
+  let left = effectiveX - (grabDC * cellStride + cs / 2);
+  let top  = e.clientY  - (grabDR * cellStride + cs / 2) - liftPx;
+
+  // Clamp the floating piece so it stays within the viewport — otherwise
+  // long horizontal pieces dragged near a screen edge run off-screen,
+  // and you lose sight of half the piece you're placing.
+  // IMPORTANT: we clamp the VISUAL position only. The ghost preview (which
+  // tells the game where you actually mean to place) is computed below
+  // from effectiveX — finger drives intent through the SAME scaling, so
+  // ghost and piece always agree. The piece just visually slides in from
+  // the edge to stay seen.
+  const { maxR, maxC } = drag;
+  const pieceW = (maxC + 1) * cellStride - gap;
+  const pieceH = (maxR + 1) * cellStride - gap;
+  const margin = 4;
+  left = Math.max(margin, Math.min(left, window.innerWidth  - pieceW - margin));
+  top  = Math.max(margin, Math.min(top,  window.innerHeight - pieceH - margin));
+
+  floatEl.style.left = left + "px";
+  floatEl.style.top  = top + "px";
+
+  // figure out which grid cell the grabbed sub-cell is hovering — use
+  // effectiveX so ghost stays under the piece, not under the raw finger
+  const br = boardEl.getBoundingClientRect();
+  const pointerBoardX = effectiveX - br.left;
+  const pointerBoardY = e.clientY  - br.top - liftPx;
+  const hoverC = Math.floor(pointerBoardX / cellStride);
+  const hoverR = Math.floor(pointerBoardY / cellStride);
+  // origin of the piece = hovered cell minus the grab offset
+  const originR = hoverR - grabDR;
+  const originC = hoverC - grabDC;
+
+  drag.originR = originR;
+  drag.originC = originC;
+
+  paintGhost(piece.shape, originR, originC, piece.color);
+
+  // --- hold-slot hover detection -------------------------------------
+  // A piece from the TRAY can be dropped into the hold slot, but only if
+  // the slot is empty (not swappable). A piece from HOLD can't go back to
+  // hold. We highlight the slot to telegraph whether the drop will work.
+  //
+  // The DROP HITBOX is inset inside the visible slot rectangle. The slot
+  // looks the same size, but the area that actually registers a hold-drop
+  // is ~12% smaller on each side. A piece grazing the edge during a
+  // horizontal drag doesn't trigger — you have to land clearly inside.
+  // (Pairs with the wider deadzone in CSS — Fix 1 + Fix 2 together.)
+  const hb = holdEl.getBoundingClientRect();
+  const HOLD_INSET = 0.12;
+  const insetX = hb.width  * HOLD_INSET;
+  const insetY = hb.height * HOLD_INSET;
+  const overHold =
+    e.clientX >= hb.left   + insetX &&
+    e.clientX <= hb.right  - insetX &&
+    e.clientY >= hb.top    + insetY &&
+    e.clientY <= hb.bottom - insetY;
+  holdEl.classList.remove("drop-ok", "drop-bad");
+  drag.overHold = false;
+  if (overHold) {
+    const canHold = drag.source === "tray" && held === null;
+    holdEl.classList.add(canHold ? "drop-ok" : "drop-bad");
+    drag.overHold = true;
+    drag.canHold = canHold;
+    // while hovering hold, the board ghost is misleading — clear it
+    boardEl.querySelectorAll(".ghost,.ghost-bad").forEach(el => {
+      el.classList.remove("ghost", "ghost-bad");
+      el.style.removeProperty("--ghost-color");
+    });
+  }
+}
+
+function paintGhost(shape, originR, originC, color) {
+  // clear any previous ghost
+  boardEl.querySelectorAll(".ghost,.ghost-bad").forEach(el => {
+    el.classList.remove("ghost", "ghost-bad");
+    el.style.removeProperty("--ghost-color");
+  });
+
+  // is the pointer even over the board area?
+  const anyInside = shape.cells.some(([dr, dc]) => {
+    const r = originR + dr, c = originC + dc;
+    return r >= 0 && c >= 0 && r < GRID_SIZE && c < GRID_SIZE;
+  });
+  if (!anyInside) return;
+
+  const ok = canPlace(shape, originR, originC);
+  for (const [dr, dc] of shape.cells) {
+    const r = originR + dr, c = originC + dc;
+    if (r < 0 || c < 0 || r >= GRID_SIZE || c >= GRID_SIZE) continue;
+    const el = cellAt(r, c);
+    if (ok) {
+      el.classList.add("ghost");
+      el.style.setProperty("--ghost-color", color);
+    } else {
+      el.classList.add("ghost-bad");
+    }
+  }
+}
+
+function onDragEnd() {
+  if (!drag) return;
+  const { piece, pieceEl, floatEl, originR, originC, source, overHold, canHold } = drag;
+
+  floatEl.remove();
+  boardEl.querySelectorAll(".ghost,.ghost-bad").forEach(el => {
+    el.classList.remove("ghost", "ghost-bad");
+    el.style.removeProperty("--ghost-color");
+  });
+  // clear any hold-slot hover highlight from onDragMove
+  holdEl.classList.remove("drop-ok", "drop-bad");
+  // Unlock page scrolling now that the drag is over.
+  document.documentElement.classList.remove("dragging");
+  window.removeEventListener("pointermove", onDragMove);
+  window.removeEventListener("pointerup", onDragEnd);
+  window.removeEventListener("pointercancel", onDragEnd);
+  window.removeEventListener("touchmove", blockTouchScroll, { passive: false });
+
+  drag = null;
+
+  // --- CASE 1: dropped on the hold slot ------------------------------
+  // Only valid if it was a TRAY piece AND hold is empty. Hold is NOT
+  // swappable, by design — once full it stays full until the held piece
+  // is placed on the board. canHold was computed live in onDragMove so
+  // we just trust it here. If the drop is invalid (held was full, or
+  // this came from hold itself), snap back to where it was.
+  if (overHold) {
+    if (canHold) {
+      // remove from its tray slot, move into hold
+      const slotIndex = tray.findIndex(p => p && p.id === piece.id);
+      if (slotIndex !== -1) tray[slotIndex] = null;
+      held = piece;
+      render();
+      // If that was the last tray piece, the tray is now all-nulls and
+      // needs to refill. afterTurn() handles both "all placed -> redeal"
+      // and "remaining pieces don't fit -> gentle redeal" — exactly what
+      // we want here. (Earlier version skipped this and the tray sat
+      // empty until the held piece was placed on the board.)
+      afterTurn();
+      return;
+    } else {
+      pieceEl.classList.remove("lifted");
+      return;
+    }
+  }
+
+  // --- CASE 2: dropped on the board ----------------------------------
+  const valid = originR !== undefined && canPlace(piece.shape, originR, originC);
+  if (valid) {
+    // if the piece came from hold, free the slot BEFORE placing — placePiece
+    // looks in the tray to clear, and wouldn't know about hold otherwise
+    if (source === "hold") held = null;
+    placePiece(piece, originR, originC);
+    return;
+  }
+
+  // --- CASE 3: dropped on nothing valid — snap back -------------------
+  pieceEl.classList.remove("lifted");
+}
+
+/* =====================================================================
+   SKINS  — apply, buy, equip
+   ---------------------------------------------------------------------
+   Block skins re-point COLORS so NEW pieces use the new palette. Pieces
+   already on the board keep their original color (repainting them mid-
+   game would look like a glitch). Background skins repaint instantly.
+   ===================================================================== */
+function findSkin(id) {
+  return [...SKINS.blocks, ...SKINS.bg].find(s => s.id === id);
+}
+
+function applyBackgroundSkin() {
+  const s = findSkin(equipped.bg);
+  if (!s) return;
+  const root = document.documentElement.style;
+  root.setProperty("--cell", s.well);
+  document.body.style.background =
+    `radial-gradient(120% 80% at 50% -10%, ${s.glow1} 0%, transparent 60%),` +
+    `radial-gradient(100% 60% at 50% 110%, ${s.glow2} 0%, transparent 55%),` +
+    s.page;
+  // repaint existing empty wells immediately
+  boardEl.querySelectorAll(".cell:not(.filled)").forEach(c => {
+    c.style.background = "";
+  });
+}
+
+function applyBlockSkin() {
+  const s = findSkin(equipped.blocks);
+  if (s) COLORS = s.colors.slice();
+  // tray + held pieces not yet placed get recolored to the new palette
+  // so the change is visible right away (existing board cells keep their
+  // original color — repainting them mid-game would read as a glitch)
+  tray.forEach(p => {
+    if (p) p.color = COLORS[(Math.random() * COLORS.length) | 0];
+  });
+  if (held) held.color = COLORS[(Math.random() * COLORS.length) | 0];
+  render();
+}
+
+function buySkin(id) {
+  const s = findSkin(id);
+  if (!s || ownedSkins.has(id) || coins < s.cost) return;
+  coins -= s.cost;
+  coinCount.textContent = coins;
+  ownedSkins.add(id);
+  equipSkin(id);            // auto-equip on purchase — instant payoff
+  toast("Unlocked: " + s.name);
+}
+
+function equipSkin(id) {
+  const s = findSkin(id);
+  if (!s || !ownedSkins.has(id)) return;
+  const kind = SKINS.blocks.includes(s) ? "blocks" : "bg";
+  equipped[kind] = id;
+  if (kind === "bg") applyBackgroundSkin();
+  else applyBlockSkin();
+  renderShop();             // refresh button states
+}
+
+/* build the shop UI from the SKINS config */
+function renderShop() {
+  shopBody.innerHTML = "";
+  const sections = [
+    { label: "Block Colors", kind: "blocks", list: SKINS.blocks },
+    { label: "Backgrounds",  kind: "bg",     list: SKINS.bg },
+  ];
+  for (const sec of sections) {
+    const lbl = document.createElement("div");
+    lbl.className = "shop-section-label";
+    lbl.textContent = sec.label;
+    shopBody.appendChild(lbl);
+
+    const grid = document.createElement("div");
+    grid.className = "skin-grid";
+
+    for (const skin of sec.list) {
+      const owned = ownedSkins.has(skin.id);
+      const isEquipped = equipped[sec.kind] === skin.id;
+
+      const card = document.createElement("div");
+      card.className = "skin-card" + (isEquipped ? " equipped" : "");
+
+      // preview swatch
+      const prev = document.createElement("div");
+      prev.className = "skin-preview";
+      if (sec.kind === "blocks") {
+        skin.colors.forEach(col => {
+          const sw = document.createElement("div");
+          sw.className = "sw";
+          sw.style.background = col;
+          prev.appendChild(sw);
+        });
+      } else {
+        prev.style.background = skin.page;
+        prev.style.gridTemplateColumns = "repeat(3,1fr)";
+        // show the well color + a couple of glow chips
+        [skin.well, skin.glow1, skin.glow2].forEach(col => {
+          const sw = document.createElement("div");
+          sw.className = "sw";
+          sw.style.background = col;
+          prev.appendChild(sw);
+        });
+      }
+
+      const name = document.createElement("div");
+      name.className = "skin-name";
+      name.textContent = skin.name;
+
+      // action button: Buy / Equip / Equipped
+      const btn = document.createElement("button");
+      if (!owned) {
+        btn.className = "skin-btn buy";
+        btn.innerHTML = `<span class="price-row" style="justify-content:center;">` +
+                        `<span class="mini-dot"></span>${skin.cost}</span>`;
+        btn.disabled = coins < skin.cost;
+        btn.addEventListener("click", () => buySkin(skin.id));
+      } else if (isEquipped) {
+        btn.className = "skin-btn equipped";
+        btn.textContent = "Equipped";
+      } else {
+        btn.className = "skin-btn equip";
+        btn.textContent = "Equip";
+        btn.addEventListener("click", () => equipSkin(skin.id));
+      }
+
+      card.append(prev, name, btn);
+      grid.appendChild(card);
+    }
+    shopBody.appendChild(grid);
+  }
+}
+
+/* =====================================================================
+   SESSION SUMMARY  — pure tuning readout
+   ---------------------------------------------------------------------
+   This is the instrument we use to set skin prices: play a few real
+   sessions, read coins/min, then anchor the SKINS costs to it.
+   ===================================================================== */
+function renderSummary() {
+  const mins = (Date.now() - stats.startTime) / 60000;
+  const coinsPerMin = mins > 0 ? stats.coinsEarned / mins : 0;
+  // how long to afford the first paid skin at this rate?
+  const firstPaid = Math.min(
+    ...[...SKINS.blocks, ...SKINS.bg].filter(s => s.cost > 0).map(s => s.cost)
+  );
+  const minsToFirst = coinsPerMin > 0 ? firstPaid / coinsPerMin : Infinity;
+
+  const rows = [
+    ["Time played",        mins < 1 ? "<1 min" : mins.toFixed(1) + " min"],
+    ["Coins earned",       stats.coinsEarned, true],
+    ["Coins / minute",     coinsPerMin.toFixed(0), true],
+    ["Pieces placed",      stats.piecesPlaced],
+    ["Tidy placements",    stats.piecesPlaced > 0
+        ? Math.round((stats.piecesPlaced - stats.holesSealed) / stats.piecesPlaced * 100) + "%"
+        : "—"],
+    ["Lines cleared",      stats.linesCleared],
+    ["Objectives done",    stats.objectivesDone],
+    ["Best streak",        "x" + (1 + stats.bestStreak * STREAK_STEP)],
+    ["Cheapest skin",      firstPaid + " coins", true],
+    ["Est. time to afford it",
+      minsToFirst === Infinity ? "—"
+        : minsToFirst < 1 ? "<1 min"
+        : minsToFirst.toFixed(1) + " min"],
+  ];
+
+  summaryBody.innerHTML = "";
+  for (const [k, v, gold] of rows) {
+    const row = document.createElement("div");
+    row.className = "stat-row";
+    row.innerHTML = `<span class="k">${k}</span>` +
+                    `<span class="v${gold ? " gold" : ""}">${v}</span>`;
+    summaryBody.appendChild(row);
+  }
+
+  // a plain-language read on whether the price feels right
+  const note = document.createElement("p");
+  note.style.cssText = "font-size:12px;color:var(--text-dim);margin:14px 0 0;line-height:1.5;";
+  if (minsToFirst === Infinity) {
+    note.textContent = "Play a bit, then reopen this — it'll estimate how long the first skin takes to earn.";
+  } else if (minsToFirst < 6) {
+    note.textContent = "First skin lands fast — generous, builds goodwill. Good if you want the loop to prove itself early.";
+  } else if (minsToFirst < 15) {
+    note.textContent = "First skin in roughly one solid session — this is the target range we discussed.";
+  } else {
+    note.textContent = "First skin takes a while — might feel grindy. Consider lowering its price or raising clear rewards.";
+  }
+  summaryBody.appendChild(note);
+}
+
+/* =====================================================================
+   GO
+   ===================================================================== */
+init();
+</script>
+</body>
+</html>
